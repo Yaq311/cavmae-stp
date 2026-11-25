@@ -1,4 +1,4 @@
-"""Full-dimensional Joint STP-8 with final two-view probability averaging."""
+"""Joint STP-8 with final two-view probability averaging."""
 
 import math
 
@@ -71,6 +71,10 @@ class STP:
         self.raw = self.transform.inverse(initial_prompt(model, prompt_seed))
         self.rng = np.random.RandomState(search_seed)
 
+    def _decode(self, raw):
+        # repair can modify its input, so preserve the raw search coordinates.
+        return np.asarray(self.transform.repair(raw.copy()), dtype=np.float64)
+
     @torch.no_grad()
     def __call__(self, audio, video):
         if len(audio) == 0 or len(audio) != len(video):
@@ -84,8 +88,7 @@ class STP:
             return predict(self.model, audio_view, video_view, state)
 
         def score(raw):
-            # repair can modify its input, so keep the raw search coordinates separate.
-            state = np.asarray(self.transform.repair(raw.copy()), dtype=np.float64)
+            state = self._decode(raw)
             if not np.isfinite(state).all():
                 raise FloatingPointError("Nonfinite prompt")
             logp = evaluate(audio, video, state)
@@ -111,3 +114,16 @@ class STP:
             raise RuntimeError(f"Expected {FORWARDS_PER_BATCH} forwards, got {calls}")
         fused_logp = fuse_predictions(best_probabilities, augmented_probabilities)
         return fused_logp, best_probabilities, calls
+
+
+class SharedIncrementSTP(STP):
+    """Apply one raw-coordinate increment to all three tokens in each modality."""
+
+    def __init__(self, model, prompt_seed=2026, search_seed=2020):
+        super().__init__(model, prompt_seed, search_seed)
+        self.initial_raw = self.raw.reshape(2, TOKENS_PER_MODALITY, -1)
+        self.raw = np.zeros(2 * self.initial_raw.shape[-1], dtype=np.float64)
+
+    def _decode(self, raw):
+        full_prompt = self.initial_raw + raw.reshape(2, 1, -1)
+        return super()._decode(full_prompt.ravel())

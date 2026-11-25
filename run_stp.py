@@ -27,7 +27,10 @@ DATA_SEED = 3
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--method", choices=("stp8_ensemble", "similarity_transfer"), default="stp8_ensemble")
+    parser.add_argument(
+        "--method", choices=("stp8_ensemble", "similarity_transfer", "shared_increment"),
+        default="stp8_ensemble",
+    )
     parser.add_argument("--corruption-modality", required=True, choices=CORRUPTIONS)
     parser.add_argument("--corruptions", nargs="+", help="Default: all for this modality")
     parser.add_argument("--manifest-root", required=True, type=Path)
@@ -77,9 +80,13 @@ def main():
     from dataloader import AudiosetDataset
     from models import CAVMAEFT
     from similarity_transfer import SimilarityTransfer
-    from stp import STP
+    from stp import STP, SharedIncrementSTP
 
-    adapter_type = SimilarityTransfer if args.method == "similarity_transfer" else STP
+    adapter_type = {
+        "stp8_ensemble": STP,
+        "similarity_transfer": SimilarityTransfer,
+        "shared_increment": SharedIncrementSTP,
+    }[args.method]
 
     device = torch.device(args.device)
     torch.set_num_threads(4)

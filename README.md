@@ -31,3 +31,7 @@ python run_stp.py \
 在上述命令中添加 `--method similarity_transfer`，并指定独立的输出文件。每个样本用冻结参考 prompt 提取融合特征，以 `softmax(cosine / 0.07)` 加权上一批的最终 prompt，然后按自己的预测熵做 8 轮搜索。首批逐样本初始化。每种损坏开始时重置历史。
 
 参考特征额外占 1 次前向，因此相似度继承每批共 19 次前向。默认方法仍是 `stp8_ensemble`。
+
+## 模态内共享增量
+
+在运行命令中添加 `--method shared_increment`，并指定独立的输出文件。每模态保留 3 个不同的初始 token，在 CMA 边界变换前给同一模态的三个 token 加同一个 768 维增量。联合搜索 1536 维，每批 18 次前向。
