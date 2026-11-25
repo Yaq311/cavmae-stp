@@ -280,7 +280,7 @@ class CAVMAEFT(nn.Module):
         """FOA forward with modality input prompts and layer statistics.
 
         Token mode appends
-        independent [K,D] prompt embeddings and carries them through modality
+        shared [K,D] or per-sample [B,K,D] prompt embeddings through modality
         and fusion attention. Only original patches enter statistics/pooling.
         """
         a = a.unsqueeze(1).transpose(2, 3)
@@ -299,19 +299,17 @@ class CAVMAEFT(nn.Module):
             if prompt is None:
                 continue
             tokens = a if modality == 'audio' else v
-            if prompt.ndim != 2 or prompt.shape[1] != tokens.shape[-1]:
-                raise ValueError('prompt tokens must have shape [K, D]')
-            # Positional/modality embeddings have already been applied to
-            # the original patches. The searched prompt is an independent
-            # embedding, carried through all modality and shared blocks.
-            # VPT places prompts before patches (after CLS, which CAV-MAE
-            # does not have). Original patches keep their position codes.
-            tokens = torch.cat((prompt.unsqueeze(0).expand(
-                tokens.shape[0], -1, -1), tokens), dim=1)
+            if prompt.ndim == 2 and prompt.shape[-1] == tokens.shape[-1]:
+                prompt = prompt.unsqueeze(0).expand(tokens.shape[0], -1, -1)
+            elif (prompt.ndim != 3 or prompt.shape[0] != tokens.shape[0]
+                  or prompt.shape[-1] != tokens.shape[-1]):
+                raise ValueError('prompt tokens must have shape [K,D] or [B,K,D]')
+            # Prepend prompts after adding position codes to the original patches.
+            tokens = torch.cat((prompt, tokens), dim=1)
             if modality == 'audio':
-                audio_offset = prompt.shape[0]
+                audio_offset = prompt.shape[1]
             else:
-                video_offset = prompt.shape[0]
+                video_offset = prompt.shape[1]
             if modality == 'audio':
                 a = tokens
             else:

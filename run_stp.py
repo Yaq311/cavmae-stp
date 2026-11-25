@@ -1,4 +1,4 @@
-"""Evaluate the STP-8 baseline on KS50 severity-5 corruption manifests."""
+"""Evaluate STP-8 on KS50 severity-5 corruption manifests."""
 
 import argparse
 from itertools import islice
@@ -27,6 +27,7 @@ DATA_SEED = 3
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--method", choices=("stp8_ensemble", "similarity_transfer"), default="stp8_ensemble")
     parser.add_argument("--corruption-modality", required=True, choices=CORRUPTIONS)
     parser.add_argument("--corruptions", nargs="+", help="Default: all for this modality")
     parser.add_argument("--manifest-root", required=True, type=Path)
@@ -75,7 +76,10 @@ def main():
 
     from dataloader import AudiosetDataset
     from models import CAVMAEFT
+    from similarity_transfer import SimilarityTransfer
     from stp import STP
+
+    adapter_type = SimilarityTransfer if args.method == "similarity_transfer" else STP
 
     device = torch.device(args.device)
     torch.set_num_threads(4)
@@ -95,7 +99,7 @@ def main():
             dataset, batch_size=16, shuffle=False, num_workers=args.num_workers,
             pin_memory=device.type == "cuda", drop_last=False,
         )
-        adapter = STP(model)
+        adapter = adapter_type(model)
         samples = batches = correct = single_correct = forwards = 0
         for audio, video, labels in islice(loader, args.max_batches):
             fused, single, calls = adapter(audio.to(device), video.to(device))
@@ -118,7 +122,7 @@ def main():
         print(json.dumps(row, allow_nan=False), flush=True)
 
     report = {
-        "method": "stp8_ensemble",
+        "method": args.method,
         "corruption_modality": args.corruption_modality,
         "severity": 5,
         "mean_accuracy": sum(row["accuracy"] for row in results) / len(results),

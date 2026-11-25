@@ -25,3 +25,9 @@ python run_stp.py \
 视频评估用 `--corruption-modality video` 和 `--output-json results/video.json`。程序按 `<manifest-root>/<模态>/<损坏>/severity_5.json` 读取索引，默认读取根目录中的 `class_labels_indices_ks50.csv`。可用 `--label-csv` 指定其他位置。索引内的音频和视频路径也需可读。
 
 快速检查时添加 `--corruptions gaussian_noise --max-batches 1 --num-workers 0`，并为检查结果指定独立的输出文件。
+
+## 相似度继承
+
+在上述命令中添加 `--method similarity_transfer`，并指定独立的输出文件。每个样本用冻结参考 prompt 提取融合特征，以 `softmax(cosine / 0.07)` 加权上一批的最终 prompt，然后按自己的预测熵做 8 轮搜索。首批逐样本初始化。每种损坏开始时重置历史。
+
+参考特征额外占 1 次前向，因此相似度继承每批共 19 次前向。默认方法仍是 `stp8_ensemble`。

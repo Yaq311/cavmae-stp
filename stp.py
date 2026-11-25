@@ -12,7 +12,7 @@ TOKENS_PER_MODALITY = 3
 FORWARDS_PER_BATCH = 2 * ROUNDS + 2
 
 
-def initial_prompt(model, seed):
+def initial_prompt(model, seed, count=None):
     """Draw the same VPT initialization as the historical STP-8 runner."""
     width = model.pos_embed_a.shape[-1]
     prompts = []
@@ -21,11 +21,14 @@ def initial_prompt(model, seed):
         area = size ** 2 if isinstance(size, int) else math.prod(size)
         bound = math.sqrt(6.0 / (3 * area + width))
         generator = torch.Generator(device="cpu").manual_seed(seed + index)
-        prompt = torch.empty(TOKENS_PER_MODALITY * width).uniform_(
+        shape = (TOKENS_PER_MODALITY * width,)
+        if count is not None:
+            shape = (count, *shape)
+        prompt = torch.empty(shape).uniform_(
             -bound, bound, generator=generator
         )
         prompts.append(prompt)
-    return torch.cat(prompts).numpy().astype(np.float64)
+    return torch.cat(prompts, dim=-1).numpy().astype(np.float64)
 
 
 def weak_view(audio, video):
@@ -34,17 +37,29 @@ def weak_view(audio, video):
     return audio, video.flip(-1)
 
 
-def predict(model, audio, video, state):
-    """Return log probabilities for one decoded shared prompt."""
+def forward_prompt(model, audio, video, state):
+    """Run CAV-MAE with one shared prompt or one prompt per sample."""
     prompt = torch.as_tensor(state, dtype=torch.float32, device=audio.device)
-    prompt_audio, prompt_video = prompt.reshape(2, TOKENS_PER_MODALITY, -1)
-    output = model.forward_foa(
+    shape = (*prompt.shape[:-1], 2, TOKENS_PER_MODALITY, -1)
+    prompt_audio, prompt_video = prompt.reshape(shape).unbind(dim=-3)
+    return model.forward_foa(
         audio, video,
         prompt_audio=prompt_audio, prompt_video=prompt_video,
         shift_vector=None, fusion_order="video_audio",
         prompt_type="tokens", feature_mode="vpt",
     )
+
+
+def predict(model, audio, video, state):
+    output = forward_prompt(model, audio, video, state)
     return output["logits"].float().log_softmax(dim=-1)
+
+
+def fuse_predictions(original, augmented):
+    fused = (original + augmented) / 2
+    if not torch.isfinite(fused).all():
+        raise FloatingPointError("Nonfinite fused prediction")
+    return fused.clamp_min(torch.finfo(fused.dtype).tiny).log()
 
 
 class STP:
@@ -92,10 +107,7 @@ class STP:
 
         augmented_audio, augmented_video = weak_view(audio, video)
         augmented_probabilities = evaluate(augmented_audio, augmented_video, best_state).exp()
-        fused = (best_probabilities + augmented_probabilities) / 2
         if calls != FORWARDS_PER_BATCH:
             raise RuntimeError(f"Expected {FORWARDS_PER_BATCH} forwards, got {calls}")
-        if not torch.isfinite(fused).all():
-            raise FloatingPointError("Nonfinite fused prediction")
-        fused_logp = fused.clamp_min(torch.finfo(fused.dtype).tiny).log()
+        fused_logp = fuse_predictions(best_probabilities, augmented_probabilities)
         return fused_logp, best_probabilities, calls
