@@ -28,7 +28,8 @@ DATA_SEED = 3
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--method", choices=("stp8_ensemble", "similarity_transfer", "shared_increment"),
+        "--method", choices=("stp8_ensemble", "similarity_transfer", "shared_increment",
+                             "stp8_grid3_full", "stp8_grid3_shared"),
         default="stp8_ensemble",
     )
     parser.add_argument("--corruption-modality", required=True, choices=CORRUPTIONS)
@@ -78,6 +79,7 @@ def main():
     from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 
     from dataloader import AudiosetDataset
+    from grid_stp import ENCODINGS_PER_MODALITY, GridSharedIncrementSTP, GridSTP
     from models import CAVMAEFT
     from similarity_transfer import SimilarityTransfer
     from stp import STP, SharedIncrementSTP
@@ -86,6 +88,8 @@ def main():
         "stp8_ensemble": STP,
         "similarity_transfer": SimilarityTransfer,
         "shared_increment": SharedIncrementSTP,
+        "stp8_grid3_full": GridSTP,
+        "stp8_grid3_shared": GridSharedIncrementSTP,
     }[args.method]
 
     device = torch.device(args.device)
@@ -123,8 +127,13 @@ def main():
             "corruption": corruption, "samples": samples, "batches": batches,
             "correct": correct, "accuracy": 100 * correct / samples,
             "single_view_accuracy": 100 * single_correct / samples,
-            "forwards_per_batch": forwards // batches, "total_forwards": forwards,
         }
+        if isinstance(adapter, GridSTP):
+            row.update(audio_encodings_per_batch=ENCODINGS_PER_MODALITY,
+                       video_encodings_per_batch=ENCODINGS_PER_MODALITY,
+                       fusions_per_batch=forwards // batches, total_fusions=forwards)
+        else:
+            row.update(forwards_per_batch=forwards // batches, total_forwards=forwards)
         results.append(row)
         print(json.dumps(row, allow_nan=False), flush=True)
 

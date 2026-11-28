@@ -274,90 +274,76 @@ class CAVMAEFT(nn.Module):
             return logits, feature, attn
         return logits
 
-    def forward_foa(self, a, v, prompt_audio=None, prompt_video=None,
-                     shift_vector=None, fusion_order='video_audio', prompt_type='tokens',
-                     feature_mode='vpt'):
-        """FOA forward with modality input prompts and layer statistics.
-
-        Token mode appends
-        shared [K,D] or per-sample [B,K,D] prompt embeddings through modality
-        and fusion attention. Only original patches enter statistics/pooling.
-        """
+    def embed_foa_inputs(self, a, v):
+        """Embed the original patches before adding any prompt tokens."""
         a = a.unsqueeze(1).transpose(2, 3)
         a = self.patch_embed_a(a)
         a = a + self.pos_embed_a + self.modality_a
         v = self.patch_embed_v(v)
         v = v + self.pos_embed_v + self.modality_v
+        return a, v
 
-        if prompt_type != 'tokens':
-            raise ValueError('unknown prompt type: {}'.format(prompt_type))
-        if feature_mode != 'vpt':
-            raise ValueError('unknown feature mode')
-        audio_count, video_count = a.shape[1], v.shape[1]
-        audio_offset = video_offset = 0
-        for modality, prompt in (('audio', prompt_audio), ('video', prompt_video)):
-            if prompt is None:
-                continue
-            tokens = a if modality == 'audio' else v
+    def encode_foa_modality(self, modality, tokens, prompt=None, *, collect_statistics=False):
+        """Encode a single modality through the blocks before cross-modal fusion."""
+        blocks = {'audio': self.blocks_a, 'video': self.blocks_v}[modality]
+        patch_count = tokens.shape[1]
+        if prompt is not None:
             if prompt.ndim == 2 and prompt.shape[-1] == tokens.shape[-1]:
                 prompt = prompt.unsqueeze(0).expand(tokens.shape[0], -1, -1)
             elif (prompt.ndim != 3 or prompt.shape[0] != tokens.shape[0]
                   or prompt.shape[-1] != tokens.shape[-1]):
                 raise ValueError('prompt tokens must have shape [K,D] or [B,K,D]')
-            # Prepend prompts after adding position codes to the original patches.
             tokens = torch.cat((prompt, tokens), dim=1)
-            if modality == 'audio':
-                audio_offset = prompt.shape[1]
-            else:
-                video_offset = prompt.shape[1]
-            if modality == 'audio':
-                a = tokens
-            else:
-                v = tokens
+        patch_start = tokens.shape[1] - patch_count
+        layers = []
+        for index, block in enumerate(blocks):
+            tokens, _ = block(tokens, ft=False)
+            if collect_statistics:
+                next_norm = (blocks[index + 1].norm1 if index + 1 < len(blocks)
+                             else self.blocks_u[0].norm1 if len(self.blocks_u) else self.norm)
+                layers.append(next_norm(tokens[:, patch_start:]).mean(dim=1))
+        return tokens, patch_count, layers
 
-        audio_layers = []
-        video_layers = []
-        for index, block in enumerate(self.blocks_a):
-            a, _ = block(a, ft=False)
-            content = a[:, audio_offset:audio_offset + audio_count]
-            next_norm = (self.blocks_a[index+1].norm1 if index+1 < len(self.blocks_a)
-                         else self.blocks_u[0].norm1 if len(self.blocks_u) else self.norm)
-            content = next_norm(content)
-            audio_layers.append(content.mean(dim=1))
-        for index, block in enumerate(self.blocks_v):
-            v, _ = block(v, ft=False)
-            content = v[:, video_offset:video_offset + video_count]
-            next_norm = (self.blocks_v[index+1].norm1 if index+1 < len(self.blocks_v)
-                         else self.blocks_u[0].norm1 if len(self.blocks_u) else self.norm)
-            content = next_norm(content)
-            video_layers.append(content.mean(dim=1))
-
+    def fuse_foa_encodings(self, audio, video, *, fusion_order='video_audio', shift_vector=None):
+        """Fuse independently encoded audio and video and classify the original patches."""
         if fusion_order == 'video_audio':
-            fused_tokens = torch.cat((v, a), dim=1)
+            first, second = video, audio
         elif fusion_order == 'audio_video':
-            fused_tokens = torch.cat((a, v), dim=1)
+            first, second = audio, video
         else:
             raise ValueError('unknown fusion order: {}'.format(fusion_order))
-
+        left, left_patches, _ = first
+        right, right_patches, _ = second
+        fused_tokens = torch.cat((left, right), dim=1)
         for block in self.blocks_u:
             fused_tokens, _ = block(fused_tokens, ft=False)
         fused_tokens = self.norm(fused_tokens)
-        # Prompts participate in attention but are not classification patches.
-        if fusion_order == 'video_audio':
-            content = torch.cat((fused_tokens[:, video_offset:video_offset + video_count],
-                fused_tokens[:, v.shape[1] + audio_offset:v.shape[1] + audio_offset + audio_count]), dim=1)
-        else:
-            content = torch.cat((fused_tokens[:, audio_offset:audio_offset + audio_count],
-                fused_tokens[:, a.shape[1] + video_offset:a.shape[1] + video_offset + video_count]), dim=1)
+        content = torch.cat(
+            (fused_tokens[:, left.shape[1] - left_patches:left.shape[1]],
+             fused_tokens[:, fused_tokens.shape[1] - right_patches:]), dim=1)
         raw_fusion_feature = content.mean(dim=1)
         fused_feature = raw_fusion_feature
         if shift_vector is not None:
             fused_feature = fused_feature + shift_vector.view(1, -1)
-        logits = self.mlp_head(fused_feature)
+        return self.mlp_head(fused_feature), fused_feature, raw_fusion_feature
+
+    def forward_foa(self, a, v, prompt_audio=None, prompt_video=None,
+                     shift_vector=None, fusion_order='video_audio', prompt_type='tokens',
+                     feature_mode='vpt'):
+        """FOA forward with shared [K,D] or per-sample [B,K,D] prompt tokens."""
+        if prompt_type != 'tokens':
+            raise ValueError('unknown prompt type: {}'.format(prompt_type))
+        if feature_mode != 'vpt':
+            raise ValueError('unknown feature mode')
+        a, v = self.embed_foa_inputs(a, v)
+        audio = self.encode_foa_modality('audio', a, prompt_audio, collect_statistics=True)
+        video = self.encode_foa_modality('video', v, prompt_video, collect_statistics=True)
+        logits, fused_feature, raw_fusion_feature = self.fuse_foa_encodings(
+            audio, video, fusion_order=fusion_order, shift_vector=shift_vector)
         return {
             'logits': logits,
-            'audio_layers': audio_layers,
-            'video_layers': video_layers,
+            'audio_layers': audio[2],
+            'video_layers': video[2],
             'fusion_feature': fused_feature,
             'raw_fusion_feature': raw_fusion_feature,
         }
